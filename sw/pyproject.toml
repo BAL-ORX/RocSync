@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/jaromeyer/rocsync"
+"Homepage" = "https://github.com/BAL-ORX/RocSync"
 
 [project.scripts]
 rocsync = "rocsync.main:main"

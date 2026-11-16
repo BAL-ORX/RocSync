@@ -23,7 +23,7 @@ Then install RocSync as a tool, which puts the `rocsync` and `rocsync-align` com
 `rocsync-evaluate` benchmark tools come along with them):
 
 ```bash
-git clone https://github.com/jaromeyer/RocSync.git
+git clone https://github.com/BAL-ORX/RocSync.git
 uv tool install ./RocSync/sw
 ```
 
@@ -37,7 +37,7 @@ uvx --from ./RocSync/sw rocsync -h
 <summary>Installing with pip instead</summary>
 
 ```bash
-git clone https://github.com/jaromeyer/RocSync.git
+git clone https://github.com/BAL-ORX/RocSync.git
 pip install ./RocSync/sw
 ```
 </details>
