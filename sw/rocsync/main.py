@@ -100,7 +100,7 @@ def main():
         type=str,
         metavar="PATH",
         nargs="+",
-        help="path to a video, image, or directory containing videos and/or images",
+        help="path to a video, image, FusionTrack recording (.csv), or directory containing them",
     )
     parser.add_argument(
         "-c",
@@ -185,7 +185,7 @@ def main():
     parser.add_argument(
         "--recurse_in_dir",
         action="store_true",
-        help="recursively search for videos and images in directories",
+        help="recursively search for videos, images and FusionTrack recordings in directories",
     )
     parser.add_argument(
         "--try-hard",

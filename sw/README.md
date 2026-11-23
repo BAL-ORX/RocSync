@@ -50,9 +50,10 @@ encoding needs an `ffmpeg` built with `hevc_nvenc`.
 rocsync [OPTIONS] PATH [PATH ...]
 ```
 
-Each `PATH` is a video, an image, an FTK tracker recording (`.csv`), or a directory containing
-them. Results for every input are collected into a single JSON file, keyed by path, with a
-`type` of `video`, `image`, or `ftk`.
+Each `PATH` is a video, an image, an FTK tracker recording (`.csv`, see
+[FusionTrack recordings](#fusiontrack-recordings)), or a directory containing them. Results for
+every input are collected into a single JSON file, keyed by path, with a `type` of `video`,
+`image`, or `ftk`.
 
 Infrared input needs an explicit `--board-version`: auto-detection identifies the board from its
 ArUco marker, which is not visible in IR.
@@ -63,15 +64,18 @@ rocsync -c ir --board-version v2 ir_recording.mp4
 
 | Option | Description |
 | --- | --- |
-| `-c, --camera_type {rgb,ir}` | Type of camera (default: `rgb`) |
+| `-c, --camera_type {rgb,ir}` | Type of camera (default: `rgb`; does not apply to FusionTrack recordings) |
 | `-i, --interval SECONDS` | Analyze at least one frame every SECONDS, placed relative to keyframes so skipped frames need not be decoded (default: `1`; `0` = every frame; videos only) |
 | `-e, --export_frames DIRECTORY` | Directory to store all raw frames as PNGs with timestamp (videos only) |
 | `-o, --output FILE` | JSON file to store results (default: `output.json`) |
 | `-y, --yes` | Do not ask for confirmation when processing multiple files |
 | `--debug DIRECTORY` | Directory to store debug images (very slow) |
-| `--board-version {auto,v1,v2}` | Board hardware revision (default: `auto`, detected from the ArUco marker ID) |
+| `--board-version {auto,v1,v2}` | Board hardware revision (default: `auto`, detected from the ArUco marker ID; also used for a FusionTrack CSV whose recording carries no registered geometry) |
+| `--max-fiducials N` | Skip a FusionTrack frame with more than N raw fiducials as too cluttered to search (default: `64`); the search cost is quadratic in this |
+| `--ftk-marker-id N` | FusionTrack geometry id of the board's registered marker; requires `--board-version` (default: `240` for v1, `241` for v2) |
+| `--try-hard` | Relaxed mode: refine the homography from partial corner LED detections and accept the board at any distance (videos and images only) |
 | `--window START END` | Time span to search (videos and FusionTrack recordings), in `hh:mm:ss` format with optionally fractional seconds; `end` is the end of the recording and `end-hh:mm:ss` counts back from it, e.g. `--window end-0:00:30 end`. For a FusionTrack recording the span is measured from its first frame. Repeat for several spans; overlapping ones are merged (default: whole recording) |
-| `--recurse_in_dir` | Recursively search for videos and images in directories |
+| `--recurse_in_dir` | Recursively search for videos, images and FusionTrack recordings in directories |
 
 Run `rocsync -h` for the authoritative list.
 
@@ -104,6 +108,64 @@ In the terminal the five checked statistics — from `Number of considered frame
 `Dropped frames` — are colour-coded green when they pass their sanity threshold and red when
 they do not. All times are board times, which is why the first frame here is negative: the
 recording started before the board's clock reached zero.
+
+## FusionTrack recordings
+`rocsync` also reads a recording of an Atracsys FusionTrack tracker that has the board in view,
+as one `.csv` file. The board is decoded from the 3D positions of its infrared LEDs, so
+`-c/--camera_type` has no effect. Any `.csv` file in a directory argument is taken to be such a
+recording; one that is not is reported as failed.
+
+```bash
+rocsync recording.csv                      # board taken from its registered marker
+rocsync --board-version v2 recording.csv   # also decode frames without a registered marker
+```
+
+### File format
+The file has no header row and its fields are separated by commas. Every row is one detected
+object: a registered marker (`m`) or a single fiducial (`f`), as given by the third column.
+Rows of any other type, and rows with fewer columns than their type needs, are skipped
+silently; extra trailing columns are ignored. The rows of one acquisition sit next to each other
+and share an `ftk_timestamp`, and acquisitions follow in ascending timestamp order. All
+positions are in millimetres.
+
+<!-- The tables mirror `marker_format` and `fiducial_format` in `rocsync/ftk.py`. -->
+
+Marker rows, 17 columns:
+
+| # | Column | Use |
+| --- | --- | --- |
+| 1 | `host_timestamp` | ignored |
+| 2 | `ftk_timestamp` | integer microseconds on the tracker's frame clock; groups rows into frames and is fitted against board time |
+| 3 | `type` | `m` |
+| 4 | `marker_id` | matched against the registered marker ids below |
+| 5-7 | `x_position`, `y_position`, `z_position` | origin of the board plane |
+| 8-16 | `r00`, `r01`, `r02`, `r10`, `r11`, `r12`, `r20`, `r21`, `r22` | 3×3 rotation matrix, row by row; its first two columns are the board's in-plane axes |
+| 17 | `registration_error` | ignored |
+
+Fiducial rows, 7 columns:
+
+| # | Column | Use |
+| --- | --- | --- |
+| 1 | `host_timestamp` | ignored |
+| 2 | `ftk_timestamp` | as above |
+| 3 | `type` | `f` |
+| 4-6 | `x_position`, `y_position`, `z_position` | position of one LED |
+| 7 | `triangulation_error` | ignored |
+
+### How a frame is decoded
+- A frame with a registered marker takes the board plane from that marker's pose, and the board
+  revision from its id: `240` for v1, `241` for v2. These are the geometry ids in
+  [`misc/ftk_geometry_rev1.ini`](../misc/ftk_geometry_rev1.ini) and
+  [`misc/ftk_geometry_rev2.ini`](../misc/ftk_geometry_rev2.ini); register the one that matches
+  your board with the tracker. `--ftk-marker-id N` replaces both ids with `N`, for the
+  `--board-version` board.
+- A frame without a registered marker, or one whose pose decode fails, is searched for the four
+  corner LEDs among its fiducials instead. This needs `--board-version`; without it, such frames
+  are skipped, and a recording with no registered marker at all fails with an error.
+- A frame with more than `--max-fiducials` fiducials is skipped as too cluttered.
+
+`--window` spans count from the first frame's `ftk_timestamp`, since the tracker's clock starts
+when it boots, not when the recording does.
 
 ## Time-syncing videos
 `rocsync-align` turns the JSON that `rocsync` wrote into actually aligned video files. It reads

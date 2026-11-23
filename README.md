@@ -18,7 +18,7 @@
 
 ## Repository Structure
 
-This repository contains three main sections, each with its own README:
+This repository contains four main sections; all but `misc/` have their own README:
 
 - **`fw/`**: PlatformIO project for microcontroller firmware.
 - **`hw/`**: KiCad files for PCB design and CAD models.
