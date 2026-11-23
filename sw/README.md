@@ -110,23 +110,63 @@ they do not. All times are board times, which is why the first frame here is neg
 recording started before the board's clock reached zero.
 
 ## FusionTrack recordings
-`rocsync` also reads a recording of an Atracsys FusionTrack tracker that has the board in view,
-as one `.csv` file. The board is decoded from the 3D positions of its infrared LEDs, so
-`-c/--camera_type` has no effect. Any `.csv` file in a directory argument is taken to be such a
-recording; one that is not is reported as failed.
+`rocsync` also reads a recording of an Atracsys FusionTrack tracker that has the board in view.
+The board is decoded from the 3D positions of its infrared LEDs, so `-c/--camera_type` has no
+effect.
+
+A recording is the Atracsys demo program's export: a `<name>_Marker.csv` and a
+`<name>_Fiducial.csv` file. Pass either file and `rocsync` finds the other next to it; if it is
+missing, that is an error. A directory argument counts each pair once, and the results are keyed
+by the fiducial file's path. Keep the demo program's file names: they are what tells `rocsync`
+a CSV file is such an export, and not a [legacy recording](#legacy-format).
 
 ```bash
-rocsync recording.csv                      # board taken from its registered marker
-rocsync --board-version v2 recording.csv   # also decode frames without a registered marker
+rocsync recording_Fiducial.csv                      # board taken from its registered marker
+rocsync --board-version v2 recording_Marker.csv     # also decode frames without a registered marker
 ```
 
 ### File format
-The file has no header row and its fields are separated by commas. Every row is one detected
-object: a registered marker (`m`) or a single fiducial (`f`), as given by the third column.
-Rows of any other type, and rows with fewer columns than their type needs, are skipped
-silently; extra trailing columns are ignored. The rows of one acquisition sit next to each other
-and share an `ftk_timestamp`, and acquisitions follow in ascending timestamp order. All
-positions are in millimetres.
+Both files have one row per detected object, with fields separated by semicolons. Some versions
+of the demo program write a header row; it is skipped, as are rows that are too short or whose
+timestamp is unreadable, and the columns are read by position. A timestamp is hexadecimal
+(`0x…`) microseconds on the tracker's frame clock. The rows of a frame share one, and each file
+lists frames in ascending timestamp order. All positions are in millimetres.
+
+<!-- The tables mirror `demo_marker_format` and `demo_fiducial_format` in `rocsync/ftk.py`. -->
+
+Marker file, 22 columns, named by the demo program's header:
+
+| # | Column | Use |
+| --- | --- | --- |
+| 1 | `Timestamp` | groups rows into frames and is fitted against board time |
+| 2-3 | `Index`, `TrackingId` | ignored |
+| 4-6 | `CoordX`, `CoordY`, `CoordZ` | origin of the board plane |
+| 7-15 | `R[0,0]`, `R[0,1]`, `R[0,2]`, `R[1,0]`, `R[1,1]`, `R[1,2]`, `R[2,0]`, `R[2,1]`, `R[2,2]` | 3×3 rotation matrix, row by row; its first two columns are the board's in-plane axes |
+| 16 | `Registration` | ignored |
+| 17 | `GeometryId` | matched against the registered marker ids below |
+| 18-22 | `PresenceMask`, `Fid[0]`, `Fid[1]`, `Fid[2]`, `Fid[3]` | ignored |
+
+Fiducial file, 10 columns:
+
+| # | Column | Use |
+| --- | --- | --- |
+| 1 | `Timestamp` | as above |
+| 2 | `Index` | ignored |
+| 3-5 | `CoordX`, `CoordY`, `CoordZ` | position of one LED |
+| 6-10 | `Epipolar`, `Triangulation`, `Probability`, `LeftIndex`, `RightIndex` | ignored |
+
+The marker file lists only the frames in which the tracker recognised a registered marker, the
+fiducial file every frame.
+
+### Legacy format
+A single `.csv` file with any other name is read as a legacy recording, which `rocsync` supports
+for existing recordings. The file has no header row and its fields are separated by commas. Every
+row is one detected object: a registered marker (`m`) or a single fiducial (`f`), as given by the
+third column. Rows of any other type, and rows with fewer columns than their type needs, are
+skipped silently; extra trailing columns are ignored. The rows of one acquisition sit next to
+each other and share an integer `ftk_timestamp` in microseconds, and acquisitions follow in
+ascending timestamp order. Any `.csv` file in a directory argument is taken to be such a
+recording, unless it is named like a demo export; a file that is not one is reported as failed.
 
 <!-- The tables mirror `marker_format` and `fiducial_format` in `rocsync/ftk.py`. -->
 
@@ -154,7 +194,7 @@ Fiducial rows, 7 columns:
 
 ### How a frame is decoded
 - A frame with a registered marker takes the board plane from that marker's pose, and the board
-  revision from its id: `240` for v1, `241` for v2. These are the geometry ids in
+  revision from its geometry id: `240` for v1, `241` for v2. These are the geometry ids in
   [`misc/ftk_geometry_rev1.ini`](../misc/ftk_geometry_rev1.ini) and
   [`misc/ftk_geometry_rev2.ini`](../misc/ftk_geometry_rev2.ini); register the one that matches
   your board with the tracker. `--ftk-marker-id N` replaces both ids with `N`, for the

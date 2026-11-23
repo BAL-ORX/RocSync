@@ -1,5 +1,9 @@
 """Read an Atracsys FusionTrack CSV recording and fit its board timeline.
 
+A recording is either the Atracsys demo program's export, a ``<name>_Marker.csv`` and a
+``<name>_Fiducial.csv`` file, or a single legacy CSV file that holds both kinds of rows.
+The file names tell the two apart.
+
 Each frame is decoded from its fiducials by ``rocsync.fiducials.decode_fiducials``: first
 on the plane of a registered board marker, if the frame has one, then on the corner-LED
 constellation if that fails.
@@ -11,8 +15,12 @@ this module stays light.
 tracker clock starts at its own boot, not at the start of the recording.
 """
 
+import heapq
 import math
 from collections.abc import Mapping
+from operator import itemgetter
+from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
@@ -26,7 +34,21 @@ FIT_RESIDUAL_THRESHOLD_MS = 10  # RANSAC inlier band; the tracker is not frame-p
 FTK_TICK_MS = 0.001  # the FusionTrack reports its frame clock in microseconds
 FTK_TICK_S = FTK_TICK_MS / 1000.0
 
+MARKER_SUFFIX = "_Marker.csv"
+FIDUCIAL_SUFFIX = "_Fiducial.csv"
 
+
+class _Layout(NamedTuple):
+    """How the rows of one recording file are laid out."""
+
+    delimiter: str
+    timestamp_column: int
+    timestamp_base: int
+    columns: dict[str, list[str]]  # the column names of each row type
+    type_column: int | None = None  # holds a row's type; None for a file of a single type
+
+
+# Legacy format: comma-separated, no header, marker and fiducial rows in one file
 marker_format = [
     "host_timestamp",
     "ftk_timestamp",
@@ -57,32 +79,154 @@ fiducial_format = [
     "triangulation_error",
 ]
 
+# Demo program format: semicolon-separated, hexadecimal timestamps, one file per row type,
+# with or without a header row. ``marker_id`` is the geometry id of the tracked marker.
+demo_marker_format = [
+    "ftk_timestamp",
+    "index",
+    "tracking_id",
+    "x_position",
+    "y_position",
+    "z_position",
+    "r00",
+    "r01",
+    "r02",
+    "r10",
+    "r11",
+    "r12",
+    "r20",
+    "r21",
+    "r22",
+    "registration_error",
+    "marker_id",
+    "presence_mask",
+    "fiducial0",
+    "fiducial1",
+    "fiducial2",
+    "fiducial3",
+]
 
-def _iter_frames(file, pbar):
-    """Group a FusionTrack CSV into frames: ``(ftk_timestamp, markers, fiducials)``.
+demo_fiducial_format = [
+    "ftk_timestamp",
+    "index",
+    "x_position",
+    "y_position",
+    "z_position",
+    "epipolar_error",
+    "triangulation_error",
+    "probability",
+    "left_index",
+    "right_index",
+]
+
+_LEGACY = _Layout(
+    delimiter=",",
+    timestamp_column=1,
+    timestamp_base=10,
+    columns={"m": marker_format, "f": fiducial_format},
+    type_column=2,
+)
+_DEMO_MARKERS = _Layout(
+    delimiter=";", timestamp_column=0, timestamp_base=16, columns={"m": demo_marker_format}
+)
+_DEMO_FIDUCIALS = _Layout(
+    delimiter=";", timestamp_column=0, timestamp_base=16, columns={"f": demo_fiducial_format}
+)
+
+
+def _demo_pair(path: Path) -> tuple[Path, Path] | None:
+    """The marker and fiducial file of the demo-format recording that `path` is one of.
+
+    None for any other file. Raises FileNotFoundError if the other half is missing.
+    """
+    for suffix in (MARKER_SUFFIX, FIDUCIAL_SUFFIX):
+        if path.name.endswith(suffix):
+            stem = path.name.removesuffix(suffix)
+            break
+    else:
+        return None
+
+    markers, fiducials = (
+        path.with_name(stem + MARKER_SUFFIX),
+        path.with_name(stem + FIDUCIAL_SUFFIX),
+    )
+    for file in (markers, fiducials):
+        if not file.is_file():
+            raise FileNotFoundError(
+                f"{file} not found: a demo-format recording needs both a {MARKER_SUFFIX} "
+                f"and a {FIDUCIAL_SUFFIX} file"
+            )
+    return markers, fiducials
+
+
+def recording_path(path: Path) -> Path:
+    """The path that identifies the recording `path` belongs to.
+
+    Either file of a demo-format recording stands for the pair, as its fiducial file;
+    any other file is a legacy recording by itself. Raises FileNotFoundError if the
+    other half of a pair is missing.
+    """
+    pair = _demo_pair(path)
+    return pair[1] if pair else path
+
+
+def _recording_sources(path: Path) -> list[tuple[Path, _Layout]]:
+    """The files of the recording `path` belongs to, with how each is laid out."""
+    pair = _demo_pair(path)
+    if pair is None:
+        return [(path, _LEGACY)]
+    markers, fiducials = pair
+    return [(markers, _DEMO_MARKERS), (fiducials, _DEMO_FIDUCIALS)]
+
+
+def _parse_row(line, layout):
+    """``(ftk_timestamp, row_type, fields)`` of a record row, or None if the row is none.
+
+    A header, a short row, a row of an unknown type and a row with an unreadable
+    timestamp are not records.
+    """
+    fields = [f.strip() for f in line.strip().split(layout.delimiter)]
+    if layout.type_column is None:
+        row_type = next(iter(layout.columns))
+    elif layout.type_column < len(fields):
+        row_type = fields[layout.type_column]
+    else:
+        return None
+
+    columns = layout.columns.get(row_type)
+    if columns is None or len(fields) < len(columns):
+        return None
+    try:
+        timestamp = int(fields[layout.timestamp_column], layout.timestamp_base)
+    except ValueError:
+        return None
+    return timestamp, row_type, fields[: len(columns)]
+
+
+def _iter_records(path, layout, pbar):
+    """Yield ``(ftk_timestamp, row_type, record)`` for each record row of a file."""
+    with open(path) as file:
+        for line in file:
+            pbar.update(1)
+            row = _parse_row(line, layout)
+            if row is not None:
+                timestamp, row_type, fields = row
+                yield timestamp, row_type, dict(zip(layout.columns[row_type], fields, strict=True))
+
+
+def _iter_frames(sources, pbar):
+    """Group a recording into frames: ``(ftk_timestamp, markers, fiducials)``.
 
     The tracker writes one record per detected object per acquisition, in timestamp
-    order, so a group is flushed as soon as the timestamp changes.
+    order, so a group is flushed as soon as the timestamp changes. The files of a
+    demo-format recording are merged on their timestamps.
     """
+    records = heapq.merge(
+        *(_iter_records(path, layout, pbar) for path, layout in sources), key=itemgetter(0)
+    )
     seen = set()
     ts, markers, fiducials = None, [], []
-    while True:
-        line = file.readline()
-        if not line:
-            break
-        pbar.update(1)
-        fields = [f.strip() for f in line.strip().split(",")]
-        if len(fields) < 3:
-            continue
-
-        if fields[2] == "m" and len(fields) >= len(marker_format):
-            record = dict(zip(marker_format, fields[: len(marker_format)], strict=True))
-        elif fields[2] == "f" and len(fields) >= len(fiducial_format):
-            record = dict(zip(fiducial_format, fields[: len(fiducial_format)], strict=True))
-        else:
-            continue
-
-        record_ts = int(record["ftk_timestamp"])
+    for record_ts, row_type, record in records:
         if record_ts != ts:
             if ts is not None:
                 yield ts, markers, fiducials
@@ -91,7 +235,7 @@ def _iter_frames(file, pbar):
             seen.add(record_ts)
             ts, markers, fiducials = record_ts, [], []
 
-        (markers if fields[2] == "m" else fiducials).append(record)
+        (markers if row_type == "m" else fiducials).append(record)
 
     if ts is not None:
         yield ts, markers, fiducials
@@ -180,38 +324,44 @@ def _window_label(windows):
     )
 
 
-def _scan_extent(filename):
-    """Line count plus the first and last ``ftk_timestamp`` in the file, in the one
-    pass the progress bar's total already costs. The tracker writes in timestamp
-    order, so these bound the recording.
+def _scan_extent(sources):
+    """Line count plus the first and last ``ftk_timestamp`` over a recording's files, in
+    the one pass the progress bar's total already costs. The tracker writes in timestamp
+    order, so these bound the recording. Raises ValueError if the files hold no record.
     """
-    total_lines, first_ts, last_ts = 0, None, None
-    with open(filename) as file:
-        for line in file:
-            total_lines += 1
-            fields = [f.strip() for f in line.strip().split(",")]
-            if len(fields) < 3 or fields[2] not in ("m", "f"):
-                continue
-            try:
-                ts = int(fields[1])
-            except ValueError:
-                continue
-            if first_ts is None:
-                first_ts = ts
-            last_ts = ts
-    return total_lines, first_ts, last_ts
+    total_lines = 0
+    extents = []
+    for path, layout in sources:
+        first_ts = last_ts = None
+        with open(path) as file:
+            for line in file:
+                total_lines += 1
+                row = _parse_row(line, layout)
+                if row is None:
+                    continue
+                if first_ts is None:
+                    first_ts = row[0]
+                last_ts = row[0]
+        if first_ts is not None and last_ts is not None:
+            extents.append((first_ts, last_ts))
+
+    if not extents:
+        names = ", ".join(path.name for path, _ in sources)
+        raise ValueError(f"no FusionTrack records found in {names}")
+    return total_lines, min(first for first, _ in extents), max(last for _, last in extents)
 
 
 def process_ftk_recording(
-    filename: str,
+    filename: str | Path,
     debug_dir=None,
     board: BoardProfile | None = None,
     max_fiducials: int = MAX_FIDUCIALS,
     marker_ids: Mapping[int, BoardProfile] | None = None,
     windows: list[tuple[float, float]] | None = None,
 ) -> dict | None:
-    """Fit a board timeline from a FusionTrack CSV recording.
+    """Fit a board timeline from a FusionTrack recording.
 
+    ``filename`` is a legacy CSV file, or either file of a demo-format recording.
     ``marker_ids`` maps registered marker ids to the board they track, defaulting to each
     profile's ``ftk_marker_id``. A frame with such a marker is decoded as that board;
     any other frame as ``board``, or skipped if ``board`` is None. ``windows`` restricts
@@ -222,19 +372,17 @@ def process_ftk_recording(
     if marker_ids is None:
         marker_ids = {p.ftk_marker_id: p for p in ALL_PROFILES}
 
-    total_lines, first_ts, last_ts = _scan_extent(filename)
+    sources = _recording_sources(Path(filename))
+    try:
+        total_lines, first_ts, last_ts = _scan_extent(sources)
+    except ValueError as e:
+        errprint(f"Error: {e}")
+        return None
 
     # Whether the reported span and dropouts describe the file or just the windows
     timeline_windowed = bool(windows)
     try:
-        windows = resolve_windows(
-            windows,
-            lambda: (
-                (last_ts - first_ts) * FTK_TICK_S
-                if first_ts is not None and last_ts is not None
-                else None
-            ),
-        )
+        windows = resolve_windows(windows, lambda: (last_ts - first_ts) * FTK_TICK_S)
     except ValueError as e:
         errprint(f"Error: Unable to resolve the search windows: {e}")
         return None
@@ -255,9 +403,8 @@ def process_ftk_recording(
             f"Analyzing frames in time window {window_label} --> Found {len(timestamps)} timestamps"
         )
 
-    with open(filename) as file, tqdm(total=total_lines, desc=describe(), position=1) as pbar:
-        for ftk_timestamp, markers, fiducials in _iter_frames(file, pbar):
-            assert first_ts is not None  # the scan saw this frame
+    with tqdm(total=total_lines, desc=describe(), position=1) as pbar:
+        for ftk_timestamp, markers, fiducials in _iter_frames(sources, pbar):
             # Window times run from the first frame, not from the tracker's boot
             offset_s = (ftk_timestamp - first_ts) * FTK_TICK_S
             while current < len(windows) and offset_s > windows[current][1]:
@@ -343,9 +490,6 @@ def process_ftk_recording(
         return None
 
     if len(timestamps) > 0:
-        assert (
-            first_ts is not None and last_ts is not None
-        )  # a decoded frame means a non-empty file
         try:
             statistics = fit_ftk_timestamps(
                 timestamps,
