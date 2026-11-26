@@ -13,7 +13,7 @@ from tqdm import tqdm
 from rocsync.board_profiles import PROFILES_BY_NAME
 from rocsync.dataset import VIDEO_SUFFIXES
 from rocsync.fiducials import MAX_FIDUCIALS
-from rocsync.ftk import process_ftk_recording
+from rocsync.ftk import process_ftk_recording, recording_name, recording_path
 from rocsync.printer import errprint, succprint, warnprint
 from rocsync.timecode import parse_hms
 from rocsync.video import DEFAULT_INTERVAL_S, process_video
@@ -100,7 +100,8 @@ def main():
         type=str,
         metavar="PATH",
         nargs="+",
-        help="path to a video, image, FusionTrack recording (.csv), or directory containing them",
+        help="path to a video, image, FusionTrack recording, or directory containing them; "
+        "a demo program recording is given by its _Fiducial.csv file or its _Marker.csv file",
     )
     parser.add_argument(
         "-c",
@@ -241,7 +242,11 @@ def main():
 
     videos = sorted([f for f in files if f.suffix.lower() in VIDEO_SUFFIXES])
     images = sorted([f for f in files if f.suffix.lower() in [".png", ".jpg", ".jpeg"]])
-    ftk_recordings = sorted([f for f in files if f.suffix.lower() == ".csv"])
+    try:
+        ftk_recordings = sorted({recording_path(f) for f in files if f.suffix.lower() == ".csv"})
+    except FileNotFoundError as e:
+        errprint(f"Error: {e}")
+        return 1
 
     if len(videos) + len(images) + len(ftk_recordings) > 1:
         print(
@@ -283,14 +288,13 @@ def main():
             continue
         print(f"\nWorking on {file}")
 
+        name = recording_name(file)
         debug_dir = None
         if args.debug:
-            name, _ = os.path.splitext(os.path.basename(file))
             debug_dir = mkdir_unique(name, args.debug)
 
         export_dir = None
         if args.export_frames:
-            name, _ = os.path.splitext(os.path.basename(file))
             export_dir = mkdir_unique(name, args.export_frames)
 
         ret = None
