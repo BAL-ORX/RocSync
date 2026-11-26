@@ -71,8 +71,11 @@ def write_legacy(path):
     path.write_text("".join(",".join(row) + "\n" for row in rows))
 
 
-def write_demo(directory, stem, header=False, markers=True):
-    """Write the demo program's pair of files, with its CRLF line endings."""
+def write_demo(directory, stem, header=False, markers="rows"):
+    """Write the demo program's files, with its CRLF line endings.
+
+    The marker file holds the board's marker rows, no rows ("empty"), or does not exist ("none").
+    """
     marker_rows, fiducial_rows = [], []
     for i, (ts, points) in enumerate(FRAMES):
         stamp = f"0x{ts:016x}"
@@ -92,11 +95,11 @@ def write_demo(directory, stem, header=False, markers=True):
         lines = ([header_row] if header else []) + [";".join(row) for row in rows]
         return "".join(line + "\r\n" for line in lines)
 
-    marker_path = directory / (stem + MARKER_SUFFIX)
-    fiducial_path = directory / (stem + FIDUCIAL_SUFFIX)
-    marker_path.write_bytes(text(marker_rows if markers else [], MARKER_HEADER).encode())
-    fiducial_path.write_bytes(text(fiducial_rows, FIDUCIAL_HEADER).encode())
-    return marker_path, fiducial_path
+    if markers != "none":
+        marker_text = text(marker_rows if markers == "rows" else [], MARKER_HEADER)
+        (directory / (stem + MARKER_SUFFIX)).write_bytes(marker_text.encode())
+    fiducial_text = text(fiducial_rows, FIDUCIAL_HEADER)
+    (directory / (stem + FIDUCIAL_SUFFIX)).write_bytes(fiducial_text.encode())
 
 
 @pytest.fixture(scope="module")
@@ -105,7 +108,8 @@ def recordings(tmp_path_factory):
     write_legacy(directory / "legacy.csv")
     for stem, header in (("plain", False), ("headed", True)):
         write_demo(directory, stem, header=header)
-    write_demo(directory, "no_markers", markers=False)
+    write_demo(directory, "no_marker_rows", markers="empty")
+    write_demo(directory, "no_marker_file", markers="none")
     return directory
 
 
@@ -140,11 +144,16 @@ def test_either_file_of_a_demo_recording_stands_for_it(recordings):
     assert by_marker == by_fiducial
 
 
-def test_demo_recording_without_marker_rows_falls_back_to_the_constellation(recordings):
-    result = _decode(recordings / ("no_markers" + FIDUCIAL_SUFFIX), board=BOARD_V2)
+@pytest.mark.parametrize("stem", ["no_marker_rows", "no_marker_file"])
+def test_demo_recording_without_markers_falls_back_to_the_constellation(recordings, stem):
+    result = _decode(recordings / (stem + FIDUCIAL_SUFFIX), board=BOARD_V2)
 
     assert result["n_pose_decodes"] == 0
     assert result["n_constellation_decodes"] == N_DECODABLE
+
+
+def test_demo_recording_without_markers_needs_a_board_version(recordings):
+    assert process_ftk_recording(recordings / ("no_marker_file" + FIDUCIAL_SUFFIX)) is None
 
 
 def test_recording_without_records_fails(tmp_path):
@@ -162,14 +171,18 @@ def test_recording_path_names_a_demo_recording_by_its_fiducial_file(recordings):
     assert recording_path(recordings / "legacy.csv") == recordings / "legacy.csv"
 
 
-@pytest.mark.parametrize(
-    "present, missing", [(MARKER_SUFFIX, FIDUCIAL_SUFFIX), (FIDUCIAL_SUFFIX, MARKER_SUFFIX)]
-)
-def test_a_demo_recording_needs_both_files(tmp_path, present, missing):
-    (tmp_path / ("lonely" + present)).write_text("")
+def test_a_lone_fiducial_file_is_a_recording(recordings):
+    fiducials = recordings / ("no_marker_file" + FIDUCIAL_SUFFIX)
 
-    with pytest.raises(FileNotFoundError, match="lonely" + missing):
-        recording_path(tmp_path / ("lonely" + present))
+    assert recording_path(fiducials) == fiducials
+
+
+def test_a_demo_recording_needs_its_fiducial_file(tmp_path):
+    lonely = tmp_path / ("lonely" + MARKER_SUFFIX)
+    lonely.write_text("")
+
+    with pytest.raises(FileNotFoundError, match="lonely" + FIDUCIAL_SUFFIX):
+        recording_path(lonely)
 
 
 def test_command_line_runs_a_demo_recording_once(recordings, tmp_path, monkeypatch):

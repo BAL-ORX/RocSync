@@ -101,7 +101,7 @@ def main():
         metavar="PATH",
         nargs="+",
         help="path to a video, image, FusionTrack recording, or directory containing them; "
-        "a demo program recording is given by either of its _Marker.csv and _Fiducial.csv files",
+        "a demo program recording is given by its _Fiducial.csv file or its _Marker.csv file",
     )
     parser.add_argument(
         "-c",

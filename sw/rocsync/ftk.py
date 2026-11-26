@@ -1,8 +1,8 @@
 """Read an Atracsys FusionTrack CSV recording and fit its board timeline.
 
-A recording is either the Atracsys demo program's export, a ``<name>_Marker.csv`` and a
-``<name>_Fiducial.csv`` file, or a single legacy CSV file that holds both kinds of rows.
-The file names tell the two apart.
+A recording is either the Atracsys demo program's export, a ``<name>_Fiducial.csv`` file
+and, if the tracker followed a registered marker, a ``<name>_Marker.csv`` file, or a single
+legacy CSV file that holds both kinds of rows. The file names tell the two apart.
 
 Each frame is decoded from its fiducials by ``rocsync.fiducials.decode_fiducials``: first
 on the plane of a registered board marker, if the frame has one, then on the corner-LED
@@ -134,10 +134,12 @@ _DEMO_FIDUCIALS = _Layout(
 )
 
 
-def _demo_pair(path: Path) -> tuple[Path, Path] | None:
-    """The marker and fiducial file of the demo-format recording that `path` is one of.
+def _demo_files(path: Path) -> tuple[Path | None, Path] | None:
+    """The marker file, if there is one, and the fiducial file of the demo-format
+    recording that `path` is one of. None for any other file.
 
-    None for any other file. Raises FileNotFoundError if the other half is missing.
+    A recording without markers is possible, one without fiducials is not, so
+    FileNotFoundError is raised if the fiducial file is missing.
     """
     for suffix in (MARKER_SUFFIX, FIDUCIAL_SUFFIX):
         if path.name.endswith(suffix):
@@ -146,37 +148,36 @@ def _demo_pair(path: Path) -> tuple[Path, Path] | None:
     else:
         return None
 
-    markers, fiducials = (
-        path.with_name(stem + MARKER_SUFFIX),
-        path.with_name(stem + FIDUCIAL_SUFFIX),
-    )
-    for file in (markers, fiducials):
-        if not file.is_file():
-            raise FileNotFoundError(
-                f"{file} not found: a demo-format recording needs both a {MARKER_SUFFIX} "
-                f"and a {FIDUCIAL_SUFFIX} file"
-            )
-    return markers, fiducials
+    fiducials = path.with_name(stem + FIDUCIAL_SUFFIX)
+    if not fiducials.is_file():
+        raise FileNotFoundError(
+            f"{fiducials} not found: a demo-format recording needs a {FIDUCIAL_SUFFIX} file"
+        )
+    markers = path.with_name(stem + MARKER_SUFFIX)
+    return (markers if markers.is_file() else None), fiducials
 
 
 def recording_path(path: Path) -> Path:
     """The path that identifies the recording `path` belongs to.
 
-    Either file of a demo-format recording stands for the pair, as its fiducial file;
-    any other file is a legacy recording by itself. Raises FileNotFoundError if the
-    other half of a pair is missing.
+    Either file of a demo-format recording stands for it, as its fiducial file; any other
+    file is a legacy recording by itself. Raises FileNotFoundError if the fiducial file of
+    a demo-format recording is missing.
     """
-    pair = _demo_pair(path)
-    return pair[1] if pair else path
+    files = _demo_files(path)
+    return files[1] if files else path
 
 
 def _recording_sources(path: Path) -> list[tuple[Path, _Layout]]:
     """The files of the recording `path` belongs to, with how each is laid out."""
-    pair = _demo_pair(path)
-    if pair is None:
+    files = _demo_files(path)
+    if files is None:
         return [(path, _LEGACY)]
-    markers, fiducials = pair
-    return [(markers, _DEMO_MARKERS), (fiducials, _DEMO_FIDUCIALS)]
+    markers, fiducials = files
+    sources = [(fiducials, _DEMO_FIDUCIALS)]
+    if markers is not None:
+        sources.append((markers, _DEMO_MARKERS))
+    return sources
 
 
 def _parse_row(line, layout):

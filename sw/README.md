@@ -114,15 +114,18 @@ recording started before the board's clock reached zero.
 The board is decoded from the 3D positions of its infrared LEDs, so `-c/--camera_type` has no
 effect.
 
-A recording is the Atracsys demo program's export: a `<name>_Marker.csv` and a
-`<name>_Fiducial.csv` file. Pass either file and `rocsync` finds the other next to it; if it is
-missing, that is an error. A directory argument counts each pair once, and the results are keyed
-by the fiducial file's path. Keep the demo program's file names: they are what tells `rocsync`
-a CSV file is such an export, and not a [legacy recording](#legacy-format).
+A recording is the Atracsys demo program's export: a `<name>_Fiducial.csv` file and, if the
+tracker followed a registered marker, a `<name>_Marker.csv` file. Pass either file and `rocsync`
+finds the other next to it. Without a marker file, the board is found among the fiducials, which
+needs `--board-version`; a marker file without its fiducial file is an error. A directory
+argument counts each recording once, and the results are keyed by the fiducial file's path. Keep
+the demo program's file names: they are what tells `rocsync` a CSV file is such an export, and
+not a [legacy recording](#legacy-format).
 
 ```bash
 rocsync recording_Fiducial.csv                      # board taken from its registered marker
 rocsync --board-version v2 recording_Marker.csv     # also decode frames without a registered marker
+rocsync --board-version v2 lone_Fiducial.csv        # no marker file: find the board among the fiducials
 ```
 
 ### File format
