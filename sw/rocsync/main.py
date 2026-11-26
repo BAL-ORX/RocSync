@@ -13,7 +13,7 @@ from tqdm import tqdm
 from rocsync.board_profiles import PROFILES_BY_NAME
 from rocsync.dataset import VIDEO_SUFFIXES
 from rocsync.fiducials import MAX_FIDUCIALS
-from rocsync.ftk import process_ftk_recording, recording_path
+from rocsync.ftk import process_ftk_recording, recording_name, recording_path
 from rocsync.printer import errprint, succprint, warnprint
 from rocsync.timecode import parse_hms
 from rocsync.video import DEFAULT_INTERVAL_S, process_video
@@ -288,14 +288,13 @@ def main():
             continue
         print(f"\nWorking on {file}")
 
+        name = recording_name(file)
         debug_dir = None
         if args.debug:
-            name, _ = os.path.splitext(os.path.basename(file))
             debug_dir = mkdir_unique(name, args.debug)
 
         export_dir = None
         if args.export_frames:
-            name, _ = os.path.splitext(os.path.basename(file))
             export_dir = mkdir_unique(name, args.export_frames)
 
         ret = None

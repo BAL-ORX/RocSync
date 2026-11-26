@@ -131,7 +131,8 @@ rocsync --board-version v2 lone_Fiducial.csv        # no marker file: find the b
 ### File format
 Both files have one row per detected object, with fields separated by semicolons. Some versions
 of the demo program write a header row; it is skipped, as are rows that are too short or whose
-timestamp is unreadable, and the columns are read by position. A timestamp is hexadecimal
+timestamp is unreadable, and the columns are read by position. `rocsync` warns once about how
+many rows it skipped, not counting blank lines or a file's first row. A timestamp is hexadecimal
 (`0x…`) microseconds on the tracker's frame clock. The rows of a frame share one, and each file
 lists frames in ascending timestamp order. All positions are in millimetres.
 
@@ -166,10 +167,11 @@ A single `.csv` file with any other name is read as a legacy recording, which `r
 for existing recordings. The file has no header row and its fields are separated by commas. Every
 row is one detected object: a registered marker (`m`) or a single fiducial (`f`), as given by the
 third column. Rows of any other type, and rows with fewer columns than their type needs, are
-skipped silently; extra trailing columns are ignored. The rows of one acquisition sit next to
-each other and share an integer `ftk_timestamp` in microseconds, and acquisitions follow in
-ascending timestamp order. Any `.csv` file in a directory argument is taken to be such a
-recording, unless it is named like a demo export; a file that is not one is reported as failed.
+skipped and counted in the same warning; extra trailing columns are ignored. The rows of one
+acquisition sit next to each other and share an integer `ftk_timestamp` in microseconds, and
+acquisitions follow in ascending timestamp order. Any `.csv` file in a directory argument is
+taken to be such a recording, unless it is named like a demo export; a file that is not one is
+reported as failed.
 
 <!-- The tables mirror `marker_format` and `fiducial_format` in `rocsync/ftk.py`. -->
 

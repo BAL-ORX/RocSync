@@ -15,12 +15,14 @@ this module stays light.
 tracker clock starts at its own boot, not at the start of the recording.
 """
 
+from __future__ import annotations
+
 import heapq
 import math
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from operator import itemgetter
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 
@@ -29,6 +31,9 @@ from rocsync.fiducials import MAX_FIDUCIALS, decode_fiducials, plane_from_rotati
 from rocsync.printer import errprint, print, warnprint
 from rocsync.recording_statistics import print_statistics, warn_about_statistics
 from rocsync.timecode import resolve_windows
+
+if TYPE_CHECKING:
+    from tqdm import tqdm
 
 FIT_RESIDUAL_THRESHOLD_MS = 10  # RANSAC inlier band; the tracker is not frame-periodic
 FTK_TICK_MS = 0.001  # the FusionTrack reports its frame clock in microseconds
@@ -180,7 +185,15 @@ def _recording_sources(path: Path) -> list[tuple[Path, _Layout]]:
     return sources
 
 
-def _parse_row(line, layout):
+def recording_name(path: Path) -> str:
+    """The name of a recording or other input file: its file name without the extension,
+    and for a demo-format recording without the ``_Fiducial`` suffix as well.
+    """
+    name = path.name.removesuffix(FIDUCIAL_SUFFIX)
+    return path.stem if name == path.name else name
+
+
+def _parse_row(line: str, layout: _Layout) -> tuple[int, str, list[str]] | None:
     """``(ftk_timestamp, row_type, fields)`` of a record row, or None if the row is none.
 
     A header, a short row, a row of an unknown type and a row with an unreadable
@@ -204,7 +217,9 @@ def _parse_row(line, layout):
     return timestamp, row_type, fields[: len(columns)]
 
 
-def _iter_records(path, layout, pbar):
+def _iter_records(
+    path: Path, layout: _Layout, pbar: tqdm
+) -> Iterator[tuple[int, str, dict[str, str]]]:
     """Yield ``(ftk_timestamp, row_type, record)`` for each record row of a file."""
     with open(path) as file:
         for line in file:
@@ -215,7 +230,9 @@ def _iter_records(path, layout, pbar):
                 yield timestamp, row_type, dict(zip(layout.columns[row_type], fields, strict=True))
 
 
-def _iter_frames(sources, pbar):
+def _iter_frames(
+    sources: list[tuple[Path, _Layout]], pbar: tqdm
+) -> Iterator[tuple[int, list[dict[str, str]], list[dict[str, str]]]]:
     """Group a recording into frames: ``(ftk_timestamp, markers, fiducials)``.
 
     The tracker writes one record per detected object per acquisition, in timestamp
@@ -325,30 +342,42 @@ def _window_label(windows):
     )
 
 
-def _scan_extent(sources):
+def _scan_extent(sources: list[tuple[Path, _Layout]]) -> tuple[int, int, int]:
     """Line count plus the first and last ``ftk_timestamp`` over a recording's files, in
     the one pass the progress bar's total already costs. The tracker writes in timestamp
     order, so these bound the recording. Raises ValueError if the files hold no record.
+
+    Warns once about the rows that are no records, apart from blank lines and the first
+    row of a file, which may be a header.
     """
     total_lines = 0
     extents = []
+    skipped = {}
     for path, layout in sources:
         first_ts = last_ts = None
+        n_skipped = 0
         with open(path) as file:
-            for line in file:
+            for i, line in enumerate(file):
                 total_lines += 1
                 row = _parse_row(line, layout)
                 if row is None:
+                    if i > 0 and line.strip():
+                        n_skipped += 1
                     continue
                 if first_ts is None:
                     first_ts = row[0]
                 last_ts = row[0]
         if first_ts is not None and last_ts is not None:
             extents.append((first_ts, last_ts))
+        if n_skipped:
+            skipped[path.name] = n_skipped
 
     if not extents:
         names = ", ".join(path.name for path, _ in sources)
         raise ValueError(f"no FusionTrack records found in {names}")
+    if skipped:
+        detail = ", ".join(f"{n} in {name}" for name, n in skipped.items())
+        warnprint(f"Skipped {sum(skipped.values())} unreadable rows: {detail}")
     return total_lines, min(first for first, _ in extents), max(last for _, last in extents)
 
 

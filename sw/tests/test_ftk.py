@@ -6,11 +6,18 @@ is known for every frame. Each recording is written in every format, and must de
 
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
 from rocsync.board_profiles import BOARD_V2
-from rocsync.ftk import FIDUCIAL_SUFFIX, MARKER_SUFFIX, process_ftk_recording, recording_path
+from rocsync.ftk import (
+    FIDUCIAL_SUFFIX,
+    MARKER_SUFFIX,
+    process_ftk_recording,
+    recording_name,
+    recording_path,
+)
 from rocsync.main import main
 from tests.test_fiducials import board_points_mm, place
 
@@ -34,6 +41,12 @@ def _board_ms(frame):
     return FIRST_BOARD_MS + frame * FRAME_US // 1000
 
 
+def _decodable(frame):
+    """Whether the lit ring LED is far enough from the ring's ends to be decoded."""
+    lit = _board_ms(frame) % BOARD_V2.period
+    return RING_EDGE_MARGIN <= lit <= BOARD_V2.period - 1 - RING_EDGE_MARGIN
+
+
 def _make_frames():
     """The tracker timestamp and fiducials of each frame."""
     frames = []
@@ -47,11 +60,7 @@ def _make_frames():
 FRAMES = _make_frames()
 _, ROTATION, ORIGIN = place(board_points_mm(BOARD_V2, 0, [10]))  # the pose of every frame
 
-# A frame whose lit ring LED is too close to the ring's ends is rejected
-N_DECODABLE = sum(
-    RING_EDGE_MARGIN <= _board_ms(i) % BOARD_V2.period <= BOARD_V2.period - 1 - RING_EDGE_MARGIN
-    for i in range(N_FRAMES)
-)
+N_DECODABLE = sum(_decodable(i) for i in range(N_FRAMES))
 
 
 def _xyz(point):
@@ -71,21 +80,23 @@ def write_legacy(path):
     path.write_text("".join(",".join(row) + "\n" for row in rows))
 
 
-def write_demo(directory, stem, header=False, markers="rows"):
+def write_demo(directory, stem, header=False, markers="rows", first_marker_frame=0):
     """Write the demo program's files, with its CRLF line endings.
 
-    The marker file holds the board's marker rows, no rows ("empty"), or does not exist ("none").
+    The marker file holds the board's marker rows from `first_marker_frame` on ("rows"),
+    no rows ("empty"), or does not exist ("none").
     """
     marker_rows, fiducial_rows = [], []
     for i, (ts, points) in enumerate(FRAMES):
         stamp = f"0x{ts:016x}"
         geometry_id = str(BOARD_V2.ftk_marker_id)
-        marker_rows.append(
-            [
-                *[stamp, "0", str(i), *_xyz(ORIGIN), *_rotation(), "0.1"],
-                *[geometry_id, "31", "0", "1", "2", "3"],
-            ]
-        )
+        if i >= first_marker_frame:
+            marker_rows.append(
+                [
+                    *[stamp, "0", str(i), *_xyz(ORIGIN), *_rotation(), "0.1"],
+                    *[geometry_id, "31", "0", "1", "2", "3"],
+                ]
+            )
         fiducial_rows += [
             [stamp, str(j), *_xyz(p), "0.1", "0.05", "1.0000", "0", "0"]
             for j, p in enumerate(points)
@@ -110,6 +121,7 @@ def recordings(tmp_path_factory):
         write_demo(directory, stem, header=header)
     write_demo(directory, "no_marker_rows", markers="empty")
     write_demo(directory, "no_marker_file", markers="none")
+    write_demo(directory, "late_markers", first_marker_frame=30)
     return directory
 
 
@@ -163,6 +175,74 @@ def test_recording_without_records_fails(tmp_path):
     assert process_ftk_recording(junk) is None
 
 
+def _with_rows_in_the_middle(path, rows):
+    """The text of the file `path` with `rows` inserted halfway, in its line ending."""
+    lines = path.read_bytes().decode().splitlines(keepends=True)
+    ending = "\r\n" if lines[0].endswith("\r\n") else "\n"
+    middle = len(lines) // 2
+    return "".join([*lines[:middle], *(row + ending for row in rows), *lines[middle:]])
+
+
+@pytest.mark.parametrize(
+    "name", ["legacy.csv", "plain" + FIDUCIAL_SUFFIX, "headed" + FIDUCIAL_SUFFIX]
+)
+def test_a_clean_recording_warns_about_no_skipped_rows(recordings, capsys, name):
+    """A header row is not an unreadable one."""
+    _decode(recordings / name)
+
+    assert "Skipped" not in capsys.readouterr().out
+
+
+def test_unreadable_rows_in_a_legacy_file_are_skipped_with_one_warning(
+    recordings, tmp_path, capsys
+):
+    junk = tmp_path / "junk.csv"
+    junk.write_bytes(
+        _with_rows_in_the_middle(
+            recordings / "legacy.csv", ["not,a,record", "0,abc,f,1,2,3,0.05"]
+        ).encode()
+    )
+
+    assert process_ftk_recording(junk) == process_ftk_recording(recordings / "legacy.csv")
+    assert capsys.readouterr().out.count("Skipped 2 unreadable rows: 2 in junk.csv") == 1
+
+
+def test_unreadable_rows_in_demo_files_are_skipped_with_one_warning(recordings, tmp_path, capsys):
+    junk_rows = {
+        FIDUCIAL_SUFFIX: ["garbage", "0xZZ;0;1;2;3;0.1;0.05;1.0000;0;0"],
+        MARKER_SUFFIX: ["0xZZ;0;0"],
+    }
+    for suffix, rows in junk_rows.items():
+        junk = tmp_path / ("junk" + suffix)
+        junk.write_bytes(_with_rows_in_the_middle(recordings / ("headed" + suffix), rows).encode())
+
+    assert process_ftk_recording(tmp_path / ("junk" + FIDUCIAL_SUFFIX)) == process_ftk_recording(
+        recordings / ("headed" + FIDUCIAL_SUFFIX)
+    )
+    expected = "Skipped 3 unreadable rows: 2 in junk_Fiducial.csv, 1 in junk_Marker.csv"
+    assert capsys.readouterr().out.count(expected) == 1
+
+
+def test_search_windows_count_from_the_first_frame_of_either_file(recordings):
+    """The marker file starts at frame 30, but the recording at frame 0."""
+    window = (0.0605, 0.3005)  # seconds from the first frame, between two 3 ms frames
+    in_window = [i for i in range(N_FRAMES) if window[0] <= i * FRAME_US / 1e6 <= window[1]]
+
+    result = process_ftk_recording(
+        recordings / ("late_markers" + FIDUCIAL_SUFFIX), board=BOARD_V2, windows=[window]
+    )
+
+    assert result is not None
+    assert result["n_frames"] == len(in_window)
+    assert result["n_decoded"] == sum(_decodable(i) for i in in_window)
+
+
+def test_recording_name():
+    assert recording_name(Path("some/dir/rec_Fiducial.csv")) == "rec"
+    assert recording_name(Path("some/dir/legacy.csv")) == "legacy"
+    assert recording_name(Path("some/dir/video.mp4")) == "video"
+
+
 def test_recording_path_names_a_demo_recording_by_its_fiducial_file(recordings):
     fiducials = recordings / ("plain" + FIDUCIAL_SUFFIX)
 
@@ -185,20 +265,54 @@ def test_a_demo_recording_needs_its_fiducial_file(tmp_path):
         recording_path(lonely)
 
 
-def test_command_line_runs_a_demo_recording_once(recordings, tmp_path, monkeypatch):
-    """A directory holds both files of a recording, which are one input."""
+@pytest.mark.parametrize(
+    "select",
+    [
+        lambda directory, marker, fiducial: [directory],
+        lambda directory, marker, fiducial: [marker, fiducial],
+        lambda directory, marker, fiducial: [marker, fiducial, directory],
+        lambda directory, marker, fiducial: [marker],
+        lambda directory, marker, fiducial: [fiducial],
+    ],
+    ids=["directory", "both files", "both files and directory", "marker file", "fiducial file"],
+)
+def test_command_line_runs_a_demo_recording_once(recordings, tmp_path, monkeypatch, select):
+    """However its files are given, the recording is one input."""
     directory = tmp_path / "recording"
     directory.mkdir()
     for suffix in (MARKER_SUFFIX, FIDUCIAL_SUFFIX):
         (directory / ("plain" + suffix)).write_bytes((recordings / ("plain" + suffix)).read_bytes())
+    marker, fiducial = (
+        directory / ("plain" + suffix) for suffix in (MARKER_SUFFIX, FIDUCIAL_SUFFIX)
+    )
     output = tmp_path / "out.json"
-    monkeypatch.setattr(sys, "argv", ["rocsync", "-y", "-o", str(output), str(directory)])
+    paths = [str(path) for path in select(directory, marker, fiducial)]
+    monkeypatch.setattr(sys, "argv", ["rocsync", "-y", "-o", str(output), *paths])
 
     assert main() is None
 
     results = json.loads(output.read_text())
-    assert list(results) == [str((directory / ("plain" + FIDUCIAL_SUFFIX)).resolve())]
-    assert results[next(iter(results))]["type"] == "ftk"
+    assert list(results) == [str(fiducial.resolve())]
+    assert results[str(fiducial.resolve())]["type"] == "ftk"
+
+
+def test_command_line_names_the_debug_directory_after_the_recording(
+    recordings, tmp_path, monkeypatch
+):
+    debug = tmp_path / "debug"
+    arguments = ["rocsync", "-y", "--debug", str(debug), "-o", str(tmp_path / "out.json")]
+    # A few frames are enough: only the directory's name is checked
+    arguments += [
+        "--window",
+        "0:00:00",
+        "0:00:00.03",
+        str(recordings / ("plain" + FIDUCIAL_SUFFIX)),
+    ]
+    monkeypatch.setattr(sys, "argv", arguments)
+
+    main()
+
+    assert [path.name for path in debug.iterdir()] == ["plain"]
 
 
 def test_command_line_rejects_a_lone_demo_file(tmp_path, monkeypatch):
